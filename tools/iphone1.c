@@ -1,71 +1,12 @@
 #include "board.h"
 #include "bringup_os1.h"
 #include "bringup.h"
-#include "lzss.h"
+#include "harness_common.h"
 #include "snapshot.h"
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct { uint8_t *p; size_t n; } blob_t;
-static uint32_t le32(const uint8_t *p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1]<<8) |
-           ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24);
-}
-static blob_t read_blob(const char *path) {
-    blob_t b={0}; FILE *f=fopen(path,"rb"); long n;
-    if (!f) { fprintf(stderr,"cannot open %s: %s\n",path,strerror(errno)); return b; }
-    fseek(f,0,SEEK_END); n=ftell(f); fseek(f,0,SEEK_SET);
-    if (n<=0 || (b.p=malloc((size_t)n))==NULL ||
-        fread(b.p,1,(size_t)n,f)!=(size_t)n) { free(b.p); b.p=NULL; }
-    fclose(f); b.n=b.p?(size_t)n:0;
-    if (!b.p) return b;
-    if (b.n>=4 && !memcmp(b.p,"8900",4)) {
-        size_t off=0x800, sz=b.n>=16?le32(b.p+12):0;
-        if (off+sz>b.n) { free(b.p); return (blob_t){0}; }
-        uint8_t *q=malloc(sz); memcpy(q,b.p+off,sz); free(b.p); b=(blob_t){q,sz};
-        printf("detected 8900 wrapper, payload=%zu\n",b.n);
-    }
-    if (b.n>=4 && !memcmp(b.p,"2gmI",4)) {
-        size_t off=0x400, sz=b.n>=0x1c?le32(b.p+0x18):0;
-        if (off+sz>b.n) { free(b.p); return (blob_t){0}; }
-        uint8_t *q=malloc(sz); memcpy(q,b.p+off,sz); free(b.p); b=(blob_t){q,sz};
-        printf("detected IMG2 wrapper, payload=%zu\n",b.n);
-    }
-    lzss_header_t h;
-    if (lzss_parse_header(b.p,b.n,&h)) {
-        uint8_t *q=malloc(h.uncompressed_size);
-        if (!q || lzss_decompress(q,h.uncompressed_size,b.p+LZSS_HEADER_SIZE,
-                                  h.compressed_size)!=h.uncompressed_size) {
-            free(q); free(b.p); return (blob_t){0};
-        }
-        free(b.p); b=(blob_t){q,h.uncompressed_size};
-        printf("detected complzss, decompressed=%zu\n",b.n);
-    } else printf("using raw file, bytes=%zu\n",b.n);
-    return b;
-}
-static int save_ppm(const char *path, const s5l8900_t *m) {
-    unsigned k=s5l_clcd_active_window(&m->clcd), w=0,h=0; size_t n;
-    uint8_t *rgb;
-    if (k==CLCD_WIN_NONE) return 0;
-    n=320u*480u*3u; rgb=malloc(n);
-    if (!rgb || !s5l_clcd_scanout(&m->clcd,k,m->ram,m->ram_base,m->ram_size,
-                                  rgb,n,&w,&h)) { free(rgb); return 0; }
-    FILE *f=fopen(path,"wb"); if (!f) { free(rgb); return 0; }
-    fprintf(f,"P6\n%u %u\n255\n",w,h); fwrite(rgb,1,(size_t)w*h*3u,f);
-    fclose(f); free(rgb); return 1;
-}
-typedef struct { FILE *serial; const s5l8900_t *m; bool bol; } tap_t;
-/* Serial output; each line in the --serial file is prefixed with the guest
- * instruction count so kernel messages can be correlated with --swi-log. */
-static void tap(void *ctx,uint8_t c) {
-    tap_t *t=ctx; putchar((int)c); fflush(stdout);
-    if (t->serial) {
-        if (t->bol) fprintf(t->serial,"%llu ",(unsigned long long)t->m->cpu.cycles);
-        fputc(c,t->serial); fflush(t->serial); t->bol=(c=='\n');
-    }
-}
 static const char *status_name(arm_status_t s) {
     switch(s) { case ARM_OK:return "ARM_OK"; case ARM_UNDEFINED:return "ARM_UNDEFINED";
     case ARM_HALT:return "ARM_HALT"; case ARM_GUEST_UNDEFINED:return "ARM_GUEST_UNDEFINED"; }
@@ -199,8 +140,8 @@ static void dump_va(s5l8900_t *m, uint32_t va, unsigned words) {
 }
 static void usage(void) {
     puts("iphone1 --board m68|n82 --kernel PATH --devicetree PATH [options]\n"
-         "  --cpi N           cycles per retired instruction, 1..16, default 1\n"
          "  --dump-ram FILE  write the guest RAM image when the run ends");
+    fputs(harness_common_usage(), stdout);
 }
 
 typedef enum {
@@ -237,27 +178,21 @@ static int input_compare(const void *a, const void *b) {
 }
 
 int main(int argc,char **argv) {
-    const char *board_name=NULL,*kp=NULL,*dp=NULL,*rp=NULL,*cmd=NULL,*serial=NULL,*shot=NULL;
-    uint64_t steps=200000000ull; unsigned ram_mb=0,vd=0,cpi=1; bool fb=true,debug=false,trace=false;
+    harness_opts_t o;
+    harness_blobs_t blobs;
+    const s5l_board_t *b;
+    const char *shot=NULL;
+    uint64_t steps=200000000ull; bool trace=false;
     uint32_t break_pc=0; uint64_t trace_from=UINT64_MAX; unsigned trace_last=256;
     uint32_t dump[8]; unsigned dump_n=0;
-    const char *unmatch[16]; unsigned unmatch_n=0; uint64_t shot_every=0; uint32_t mmio_watch=0;
-    const char *load_path = NULL, *save_path = NULL, *dump_ram = NULL;
+    uint64_t shot_every=0; uint32_t mmio_watch=0;
+    const char *save_path = NULL, *dump_ram = NULL;
     uint64_t save_step = UINT64_MAX;
     input_event_t events[128]; unsigned event_n = 0;
+    harness_opts_init(&o);
     for (int i=1;i<argc;i++) {
-        if (!strcmp(argv[i],"--board")&&i+1<argc) board_name=argv[++i];
-        else if (!strcmp(argv[i],"--kernel")&&i+1<argc) kp=argv[++i];
-        else if (!strcmp(argv[i],"--devicetree")&&i+1<argc) dp=argv[++i];
-        else if (!strcmp(argv[i],"--ramdisk")&&i+1<argc) rp=argv[++i];
-        else if (!strcmp(argv[i],"--ram-mb")&&i+1<argc) ram_mb=(unsigned)strtoul(argv[++i],NULL,0);
-        else if (!strcmp(argv[i],"--cpi")&&i+1<argc) cpi=(unsigned)strtoul(argv[++i],NULL,0);
-        else if (!strcmp(argv[i],"--cmdline")&&i+1<argc) cmd=argv[++i];
+        if (harness_parse_common(&o, argc, argv, &i)) continue;
         else if (!strcmp(argv[i],"--steps")&&i+1<argc) steps=strtoull(argv[++i],NULL,0);
-        else if (!strcmp(argv[i],"--no-fb")) fb=false;
-        else if (!strcmp(argv[i],"--v-display")&&i+1<argc) vd=(unsigned)strtoul(argv[++i],NULL,0);
-        else if (!strcmp(argv[i],"--debug-enabled")) debug=true;
-        else if (!strcmp(argv[i],"--serial")&&i+1<argc) serial=argv[++i];
         else if (!strcmp(argv[i],"--screenshot")&&i+1<argc) shot=argv[++i];
         else if (!strcmp(argv[i],"--shot-every")&&i+1<argc) shot_every=strtoull(argv[++i],NULL,0);
         else if (!strcmp(argv[i],"--trace-devices")) trace=true;
@@ -266,7 +201,6 @@ int main(int argc,char **argv) {
             save_step = strtoull(argv[++i], NULL, 0);
             save_path = argv[++i];
         }
-        else if (!strcmp(argv[i],"--load")&&i+1<argc) load_path=argv[++i];
         else if (!strcmp(argv[i],"--at")&&i+2<argc) {
             input_event_t e = { .step = strtoull(argv[++i], NULL, 0) };
             const char *action = argv[++i];
@@ -325,7 +259,6 @@ int main(int argc,char **argv) {
             g_watch[g_watch_n++]=(uint32_t)strtoul(argv[++i],NULL,0)&~1u;
         else if (!strcmp(argv[i],"--trace-from")&&i+1<argc) trace_from=strtoull(argv[++i],NULL,0);
         else if (!strcmp(argv[i],"--trace-last")&&i+1<argc) trace_last=(unsigned)strtoul(argv[++i],NULL,0);
-        else if (!strcmp(argv[i],"--unmatch")&&i+1<argc&&unmatch_n<16) unmatch[unmatch_n++]=argv[++i];
         else if (!strcmp(argv[i],"--swi-log")&&i+2<argc&&g_watch_n<S5L_PRE_STEP_TARGET_MAX-1u) {
             g_watch[g_watch_n++]=g_swi_pc=(uint32_t)strtoul(argv[++i],NULL,0)&~1u;
             g_swi_log=fopen(argv[++i],"w"); if (!g_swi_log) { perror("--swi-log"); return 1; } }
@@ -347,52 +280,25 @@ int main(int argc,char **argv) {
         else if (!strcmp(argv[i],"--dump-ram")&&i+1<argc) dump_ram=argv[++i];
         else { usage(); return 2; }
     }
-    const s5l_board_t *b=s5l_board_find(board_name);
-    if (!b||!kp||!dp) { usage(); return 2; }
-    blob_t k=read_blob(kp), d=read_blob(dp), rd=rp?read_blob(rp):(blob_t){0};
-    if (!k.p||!d.p||(rp&&!rd.p)) { free(k.p);free(d.p);free(rd.p);return 1; }
-    char why[256];
-    if (!s5l_board_check_devicetree(b,d.p,d.n,why,sizeof why)) {
-        fprintf(stderr,"device tree rejected: %s\n",why); return 1;
-    }
+    if (!o.board || !o.kernel || !o.devicetree) { usage(); return 2; }
+    if (!harness_load_blobs(&o, &blobs)) return 1;
     s5l8900_t m;
-    if (!s5l_board_init(b,&m,ram_mb?ram_mb<<20:0)) {
-        fprintf(stderr,"machine init failed (RAM may overlap a device window)\n");
+    if (!harness_init_machine(&o, &m, &b)) {
+        harness_free_blobs(&blobs);
         return 1;
     }
     m.trace_devices=trace; m.mtz1.trace=trace; m.mmio_watch_page=mmio_watch;
-    s5l_os1_request_t q={k.p,k.n,d.p,d.n,rd.p,rd.n,cmd,fb,vd,b->lcd_width,b->lcd_height,debug,
-                         unmatch,unmatch_n};
-    s5l_os1_result_t r;
-    if (!s5l_os1_boot(&m,&q,&r)) { fprintf(stderr,"boot failed: %s\n",r.detail);
-        s5l8900_free(&m); return 1; }
-    printf("layout virt_base=0x%08x phys_base=0x%08x ram_size=0x%08x\n",
-           r.virt_base,r.phys_base,r.ram_size);
-    printf("kernel_begin_pa=0x%08x kernel_end_pa=0x%08x entry_pa=0x%08x entry_va=0x%08x\n",
-           r.kernel_begin_pa,r.kernel_end_pa,r.entry_pa,r.entry_va);
-    printf("devicetree_pa=0x%08x devicetree_va=0x%08x devicetree_size=0x%08x\n",
-           r.devicetree_pa,r.devicetree_va,r.devicetree_size);
-    printf("boot_args_pa=0x%08x ramdisk_pa=0x%08x ramdisk_va=0x%08x ramdisk_size=0x%08x\n",
-           r.boot_args_pa,r.ramdisk_pa,r.ramdisk_va,r.ramdisk_size);
-    printf("framebuffer_pa=0x%08x vram_bytes=0x%08x top_of_kernel_data_pa=0x%08x cmdline=\"%s\"\n",
-           r.framebuffer_pa,r.vram_bytes,r.top_of_kernel_data_pa,r.cmdline);
-    if (load_path) {
-        snapshot_status_t ss = snapshot_load(&m, load_path);
-        if (ss != SNAP_OK) {
-            fprintf(stderr, "snapshot load failed: %s\n", snapshot_strerror(ss));
-            s5l8900_free(&m); free(k.p); free(d.p); free(rd.p);
-            return 1;
-        }
-        fprintf(stderr, "loaded snapshot %s at step %llu\n", load_path,
-                (unsigned long long)m.cpu.cycles);
-    }
-    if (!s5l8900_set_cycles_per_insn(&m, cpi)) {
-        fprintf(stderr, "invalid --cpi %u (expected 1..16)\n", cpi);
-        s5l8900_free(&m); free(k.p); free(d.p); free(rd.p);
-        return 2;
+    if (!harness_boot(&o, b, &m, &blobs)) {
+        s5l8900_free(&m);
+        harness_free_blobs(&blobs);
+        return o.cpi >= 1 && o.cpi <= 16 ? 1 : 2;
     }
     qsort(events, event_n, sizeof events[0], input_compare);
-    tap_t t={serial?fopen(serial,"wb"):NULL,&m,true}; s5l8900_set_uart0_host(&m,tap,&t);
+    harness_serial_t t;
+    if (!harness_serial_open(&t, o.serial, &m, true)) {
+        s5l8900_free(&m); harness_free_blobs(&blobs); return 1;
+    }
+    s5l8900_set_uart0_host(&m,harness_serial_tx,&t);
     arm_status_t st=ARM_OK; uint64_t total=m.cpu.cycles; uint32_t ring[32]={0}; unsigned ri=0, same=0;
     unsigned next_event = 0; bool saved = false;
     bool tap_pending = false, press_pending = false;
@@ -480,7 +386,7 @@ int main(int argc,char **argv) {
         }
         if (shot&&shot_every&&total/shot_every!=(total-n)/shot_every) {
             char p[512]; snprintf(p,sizeof p,"%s.%llu.ppm",shot,(unsigned long long)(total/shot_every));
-            if (!save_ppm(p,&m)) printf("periodic screenshot %s: no active CLCD window\n",p);
+            if (!harness_save_ppm(p,&m)) printf("periodic screenshot %s: no active CLCD window\n",p);
         }
         if (g_break_hit) { reason="break-pc"; break; }
         uint32_t win=m.cpu.r[15]&~63u;
@@ -520,11 +426,11 @@ int main(int argc,char **argv) {
         if (pc>=m.ram_base&&off+4<=m.ram_size)
             printf("bytes-at-pc=%02x%02x%02x%02x\n",m.ram[off],m.ram[off+1],m.ram[off+2],m.ram[off+3]);
     }
-    if (shot&&!save_ppm(shot,&m)) fprintf(stderr,"screenshot failed: %s\n",shot);
+    if (shot&&!harness_save_ppm(shot,&m)) fprintf(stderr,"screenshot failed: %s\n",shot);
     if (dump_ram) {
         FILE *rf=fopen(dump_ram,"wb");
         if (!rf||fwrite(m.ram,1,m.ram_size,rf)!=m.ram_size) fprintf(stderr,"ram dump failed: %s\n",dump_ram);
         if (rf) fclose(rf);
     }
-    if (t.serial) fclose(t.serial); s5l8900_free(&m); free(k.p);free(d.p);free(rd.p); return 0;
+    harness_serial_close(&t); s5l8900_free(&m); harness_free_blobs(&blobs); return 0;
 }
