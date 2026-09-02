@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install SDL2 development files
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
       - name: Build native emulator
         run: |
           cmake -S . -B build

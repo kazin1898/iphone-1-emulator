@@ -10,6 +10,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(IPHONE1_WEB "Build the Emscripten browser frontend" OFF)
+option(IPHONE1_SDL "Build the SDL2 desktop frontend when SDL2 is available" ON)
 if(NOT IPHONE1_WEB)
     set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG" CACHE STRING "" FORCE)
     include(CheckIPOSupported)
