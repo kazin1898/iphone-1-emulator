@@ -1,5 +1,7 @@
 # Delivery plan: a usable original iPhone in the browser
 
+> Historical recordings and publishing artifacts have been removed from Git history. The summaries below describe the original runs; remaining test reports and screenshots are retained. Historical hash receipts may predate this archival cleanup.
+
 Planning baseline: 2026-09-05, local commit `b0a7399`. This is a proposed implementation plan, not a claim that the features below are complete. The existing browser recordings demonstrate SpringBoard, Settings, Safari launches, and Home navigation; the other app workflows need verification.
 
 ## Product destination
@@ -183,7 +185,7 @@ Weather/Stocks/Mail/Maps adapters depend on milestone 5, not Camera. YouTube dep
 - Test cached offline startup, missing/corrupt downloads, denied storage/camera permissions, audio unlock, background/resume, low quota, two tabs, service outage, and old saves after upgrade. Foreground resume must not produce runaway clock catch-up or stuck audio/input.
 - Run native regressions, WASM startup, real browser app flows, release cold boot, snapshot compatibility, and the 30-minute soak. Use a browser automation runner for repeatability and actual Safari testing for the Safari claim; a generic WebKit runner is supplementary.
 - Put every app's demo/live/unsupported boundaries in compact surrounding help. Keep the main view focused on the phone.
-- Record the full release walkthrough and per-milestone clips at `tweets/videos/<slug>.mp4`, generate matching thumbnails, and update the tweet index. Existing clips may support a baseline but cannot prove a new feature or speed result.
+- Keep release recordings and matching verification reports in `.context/`; do not commit generated media.
 
 Exit gate: all agreed app workflows, browser performance budgets, persistence/recovery checks, and hosted smoke checks pass, with a release manifest and rollback path.
 

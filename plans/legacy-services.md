@@ -1,5 +1,7 @@
 # Compatible services for original apps
 
+> Historical recordings and publishing artifacts have been removed from Git history. The summaries below describe the original runs; remaining test reports and screenshots are retained. Historical hash receipts may predate this archival cleanup.
+
 The browser roadmap calls for deterministic demo services first, exercised by Apple's original apps through the guest's network stack. Live data is a later adapter. Current networking is still at isolated Wi-Fi firmware transport; no app service has been delivered successfully.
 
 ## Weather: first protocol candidate
@@ -19,4 +21,4 @@ An initial malformed-URL test was rejected by the test client before reaching th
 Integration still requires a genuine guest network request/response, visible demo mode in the surrounding product, original forecast rendering/units, city editing and persistence. An HTTP header or XML attribute alone does not label data for the user. The backend has no live provider or public deployment.
 
 
-The original app's existing controls now have a separate [074 persistence gate](../tweets/074_weather_controls_persist.md): units and New York removal survive three exact Save/reloads. This used no backend response. City search/addition, forecast display and actual temperature conversion still require network integration.
+The original app's existing controls now have a separate [074 persistence gate](../docs/traces/weather-controls/README.md): units and New York removal survive three exact Save/reloads. This used no backend response. City search/addition, forecast display and actual temperature conversion still require network integration.
