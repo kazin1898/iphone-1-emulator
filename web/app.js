@@ -46,6 +46,7 @@ function controls() {
   $('import').disabled = !ready || saving || !profileOwned;
   $('reset').disabled = saving || !profileOwned;
   $('recover').disabled = saving || !profileOwned;
+  $('fresh').disabled = saving || !profileOwned;
   $('offline').disabled = !ready || preparingOffline || !('serviceWorker' in navigator);
   canvas.style.pointerEvents = ready && !paused ? '' : 'none';
 }
@@ -63,6 +64,8 @@ function fail(error) {
   $('progress').hidden = true;
   $('retry').hidden = false; $('retry').disabled = false;
   $('recover').hidden = !savedRecord;
+  // A save that cannot start would otherwise trap phones whose controls are hidden.
+  $('fresh').hidden = !savedRecord || !profileOwned;
   controls();
 }
 function showRunning() {
@@ -89,7 +92,7 @@ async function start(recovery = null) {
   for (const req of pending.values()) req.reject(new Error('Phone restarted'));
   pending.clear(); contacts.clear(); keys.clear();
   canvas.dataset.ready = 'false'; document.body.dataset.ready = 'false';
-  controls(); $('progress').hidden = false; $('retry').hidden = true; $('recover').hidden = true;
+  controls(); $('progress').hidden = false; $('retry').hidden = true; $('recover').hidden = true; $('fresh').hidden = true;
   setProgress(0);
   setStatus('Downloading iPhone OS…');
   try {
@@ -396,13 +399,17 @@ $('import').addEventListener('change', async event => {
   } catch (error) { track('backup import failed', {error_type:error?.name || 'Error'}); setStatus(`Import failed: ${describeError(error)}. Your previous save is retained.`); }
   finally { saving = false; controls(); }
 });
-$('reset').addEventListener('click', async () => {
-  if (!profileOwned || !confirm('Reset this phone and delete its browser saves? Export first to keep a backup.')) return;
+async function startFresh(question, event) {
+  if (!profileOwned || !confirm(question)) return;
   saving = true; controls();
-  try { await clearCheckpoints(); track('phone reset'); savedRecord = null; lastSave = 0; await start(); }
+  try { await clearCheckpoints(); track(event); savedRecord = null; lastSave = 0; await start(); }
   catch (error) { fail(error); }
   finally { saving = false; controls(); }
-});
+}
+$('reset').addEventListener('click', () =>
+  startFresh('Reset this phone and delete its browser saves? Export first to keep a backup.', 'phone reset'));
+$('fresh').addEventListener('click', () =>
+  startFresh('Erase this phone\'s saves and start a fresh iPhone? This cannot be undone.', 'phone reset after failure'));
 $('retry').addEventListener('click', () => { track('emulator retry requested'); start().catch(fail); });
 $('recover').addEventListener('click', async () => {
   try {

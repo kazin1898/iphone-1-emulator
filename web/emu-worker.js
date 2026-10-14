@@ -115,10 +115,13 @@ function setPaused(value) {
 async function openLocked() {
   send('loading', {message:'Waking your iPhone…'});
   check(api.hostClock(1));
+  // Budget guest time, not host time: slow devices may need longer than a
+  // fast desktop, but a guest that ignores 30 s of its own clock is stuck.
   const advanceUntil = async predicate => {
-    const deadline = performance.now() + 20000;
+    const guestDeadline = api.ticks() + 180000000, deadline = performance.now() + 60000;
     while (!predicate()) {
-      if (performance.now() > deadline) throw new Error('Your iPhone could not wake. Please retry.');
+      if (api.ticks() > guestDeadline || performance.now() > deadline)
+        throw new Error('Your iPhone could not wake. Please retry.');
       const began = performance.now();
       if (!api.clockDelay()) {
         do {

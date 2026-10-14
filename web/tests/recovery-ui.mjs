@@ -53,6 +53,24 @@ try{
  await page.getByRole('button',{name:'Try again',exact:true}).focus();await page.keyboard.press('Enter');await ready();
  check('keyboard retry restarts genuine guest',await page.evaluate(()=>window.iphone.ready));
  check('keyboard retry clears error overlay',!await page.locator('#boot-loader').isVisible());
+ await page.evaluate(async()=>{
+  const {PROFILE_VERSION}=await import('./storage.js');
+  const broken=savedAt=>({version:PROFILE_VERSION,savedAt,size:27,storedSize:27,encoding:'raw',data:new Blob(['not a real machine snapshot'])});
+  const db=await new Promise((resolve,reject)=>{const r=indexedDB.open('iphone-1',1);r.onupgradeneeded=()=>r.result.createObjectStore('checkpoints');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});
+  await new Promise((resolve,reject)=>{const tx=db.transaction('checkpoints','readwrite'),store=tx.objectStore('checkpoints');store.put(broken(1),'previous');store.put(broken(2),'current');tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error);});db.close();
+ });
+ await page.reload();await page.getByRole('button',{name:'Try again',exact:true}).waitFor({state:'visible',timeout:60000});
+ check('unstartable save offers previous save and fresh start inside phone',await page.locator('#recover').isVisible()&&await page.locator('#fresh').isVisible()&&await page.locator('#fresh').isEnabled());
+ await page.screenshot({path:dir+'/unstartable-save.png'});
+ await page.getByRole('button',{name:'Restore previous save',exact:true}).click();
+ await page.getByRole('button',{name:'Erase and start fresh',exact:true}).waitFor({state:'visible',timeout:60000});
+ check('broken previous save still leaves fresh start available',!await page.evaluate(()=>window.iphone.ready));
+ page.once('dialog',dialog=>dialog.dismiss());await page.locator('#fresh').click();await page.waitForTimeout(500);
+ check('declining fresh start keeps saves',await page.evaluate(async()=>Boolean(await (await import('./storage.js')).readCheckpoint())));
+ page.once('dialog',dialog=>dialog.accept());await page.locator('#fresh').click();await ready();
+ check('fresh start boots the shipped phone',await page.evaluate(()=>window.iphone.ready)&&!await page.locator('#boot-loader').isVisible());
+ check('fresh start erased both saves',await page.evaluate(async()=>{const s=await import('./storage.js');return !await s.readCheckpoint()&&!await s.readCheckpoint('previous');}));
+ await page.screenshot({path:dir+'/fresh-start.png'});
  await page.waitForTimeout(1200);check('no page errors',report.errors.length===0);report.result='pass';
 }catch(e){report.result='fail';report.error=e.stack;throw e;}
 finally{report.elapsedSeconds=(performance.now()-began)/1000;await writeFile(dir+'/report.json',JSON.stringify(report,null,2)+'\n');await context.close();await browser.close();}
