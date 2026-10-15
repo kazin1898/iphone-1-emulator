@@ -192,7 +192,11 @@ python3 tools/firmware/rootfs_work.py fw/rootfs_1A543a_hfs.img fw/work_1A543a.im
     --no-autolock --activate
 ```
 
-The extractor produces a kernel, device tree, and root filesystem.
+The extractor writes `kernel_1A543a.macho`, `devicetree_m68ap.bin`, and `rootfs_1A543a_hfs.img`.
+It takes the kernel from the kernelcache installed in the root filesystem, which is the one iBoot boots;
+the restore kernelcache at the top of the IPSW carries fewer kexts.
+The output kernel and device tree match the copies in `web/firmware/`.
+Without a native build, it prints the `unlzss` command to run instead of writing the kernel.
 The work-image tool copies the extracted image before it changes data.
 These commands prepare a work image.
 They do not recreate every packaged snapshot or release artifact.
