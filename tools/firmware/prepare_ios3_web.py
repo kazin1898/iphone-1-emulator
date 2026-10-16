@@ -19,9 +19,9 @@ KEYS     this build's published firmware keys as JSON, either {"keys": [...]}
 Steps, each from a measured failure (see plans/ios3-m68.md):
   1. decrypt the kernelcache and M68 device tree (IMG3, final block included);
   2. decrypt and extract the root volume;
-  3. grow it by 96 MB, rewrite fstab to /dev/md0, select Core Animation's
-     software renderer for SpringBoard and seed lockdownd's FactoryActivated
-     record;
+  3. grow it by 96 MB, rewrite fstab to /dev/md0 and seed lockdownd's
+     FactoryActivated record (SpringBoard keeps Apple's MBX2D compositing:
+     the boot matches arm-io/mbx);
   4. disable SpringBoard's auto-lock and dim for the mobile user, and
      provision lockdownd's device RSA key pair (it otherwise generates one in
      Security's bignum code, 51-95% of guest instructions for >2 G);
@@ -115,7 +115,6 @@ def main():
     disk = out / "disk_7E18.img"
     run(py, HERE / "rootfs_work.py", work / "rootfs.img", disk,
         "--fstab", FSTAB,
-        "--launchd-env", "com.apple.SpringBoard.plist=CA_ENABLE_MBX2D=0",
         "--no-autolock-mobile", "--device-keys",
         "--add", "/private/var/root/Library/Lockdown/data_ark.plist=" +
         str(HERE / "data_ark_activated_3x.plist"))

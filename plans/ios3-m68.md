@@ -17,8 +17,8 @@ on the M68 board to the lock screen. Slide to unlock reaches the home screen
 - Bring-up now takes the Merlot node from the board: `arm-io/spi1/lcd0` on
   M68, behind the spi0 MPL bridge. AppleMerlotLCD accepts the N82 panel ID
   `0x00a5c22b`.
-- M68 un-matches `arm-io/mbx`, `arm-io/sha1`, `arm-io/uart1/baseband` and
-  `arm-io/usb-otg`. It keeps spi2, because the Z1 touch controller is there;
+- M68 un-matches `arm-io/sha1`, `arm-io/uart1/baseband` and `arm-io/usb-otg`.
+  `arm-io/mbx` stays matched: AppleMBX attaches to the core's MBX model. It keeps spi2, because the Z1 touch controller is there;
   on N82 spi2 is the baseband bus.
 - Measured run to the lock screen: launchd at about 0.29 G instructions, the
   WM8758, PL080 and multitouch drivers start, the Z1 firmware download (44,484
@@ -49,7 +49,7 @@ failure:
 | --- | --- |
 | `fstab`: `/dev/md0 / hfs rw,update 0 0` | `fsck` cannot find `/dev/disk0s1` (or dies with SIGFPE on `rmd0`), and launchd halts |
 | `hfsx_grow.py IMAGE 96` | nothing can be allocated on `/`, so boot stalls behind the Apple logo and its progress bar |
-| SpringBoard `CA_ENABLE_MBX2D=0` | MBX is un-matched, so QuartzCore's MBX2D context is NULL; SpringBoard dies at 0x48 and respawns forever |
+| keep `arm-io/mbx` matched (was: SpringBoard `CA_ENABLE_MBX2D=0`) | with MBX un-matched, QuartzCore's MBX2D context is NULL and SpringBoard dies at 0x48; the software renderer it needs instead costs >3x the instructions per app launch |
 | `data_ark.plist` `FactoryActivated` | lockdownd reports `Unactivated` and enables the brick state |
 
 ```sh

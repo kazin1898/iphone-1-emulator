@@ -53,9 +53,22 @@ which took 51-95% of guest instructions until about 5.3-6.0 G instructions.
 A snapshot taken before that point makes every visit repeat it. With the keys
 provisioned and the snapshot taken after the remaining bignum work (none
 after ~5.9 G), a Calculator launch from the home screen takes 0.29 G guest
-instructions, against 0.39 G from a snapshot taken during that work. Slide to unlock,
+instructions, against 0.39 G from a snapshot taken during that work.
+
+The second lever is compositing. iPhone OS 3's AppleMBX attaches to the
+core's PowerVR MBX model ("Detected mbx,s5l8900x", AppleH1CLCD swap device),
+so `arm-io/mbx` stays matched and SpringBoard keeps Apple's MBX2D path
+instead of `CA_ENABLE_MBX2D=0` software rendering. Calculator launch:
+
+| Compositing | Guest instructions to a settled Calculator | At ~25 MIPS |
+| --- | --- | --- |
+| Core Animation software renderer | 0.29 G | ~12 s |
+| MBX (default) | <=0.09 G (82% of the final frame at 0.04 G) | <=4 s |
+
+The traced launch completed 133/133 2D packets and 355/355 3D renders, with
+none rejected. The final frame matches the software-rendered one. Slide to unlock,
 taps, app launch (Calculator) and the Home button work. The guest runs on
-the interpreter only, so it is slow.
+the interpreter only.
 
 ## Current limits
 

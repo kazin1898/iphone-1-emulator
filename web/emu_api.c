@@ -346,10 +346,10 @@ int emu_init(const uint8_t *kernel, size_t kernel_size,
 }
 
 /* Nubs iPhone OS 3 must not match on M68 until their devices are modeled;
- * spi2 carries the Z1 touch controller and stays matched. Same list as
+ * spi2 (Z1 touch) and mbx (hardware compositing) stay matched. Same list as
  * tools/iphone1.c --ios3. */
 static const char *const m68_ios3_unmatch[] = {
-    "arm-io/mbx", "arm-io/sha1", "arm-io/uart1/baseband", "arm-io/usb-otg"
+    "arm-io/sha1", "arm-io/uart1/baseband", "arm-io/usb-otg"
 };
 
 /*

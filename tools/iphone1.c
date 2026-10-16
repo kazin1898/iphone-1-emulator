@@ -86,9 +86,12 @@ static vm_block_io_status_t media_flush(void *ctx) {
 }
 
 /* Nubs iPhone OS 3 must not match on M68 until their devices are modeled.
- * Unlike N82, spi2 carries the Z1 touch controller here and stays matched. */
+ * Unlike N82, spi2 carries the Z1 touch controller here and stays matched.
+ * arm-io/mbx stays matched too: AppleMBX attaches to the core's model and
+ * QuartzCore composites through MBX2D (Calculator launch 0.29 G -> <=0.09 G
+ * guest instructions, 133/133 2D and 355/355 3D submits, none rejected). */
 static const char *const m68_ios3_unmatch[] = {
-    "arm-io/mbx", "arm-io/sha1", "arm-io/uart1/baseband", "arm-io/usb-otg"
+    "arm-io/sha1", "arm-io/uart1/baseband", "arm-io/usb-otg"
 };
 
 typedef struct { FILE *serial; const s5l8900_t *m; bool bol; } tap_t;
