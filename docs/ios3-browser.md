@@ -18,10 +18,12 @@ python3 tools/firmware/prepare_ios3_web.py iPhone1,1_3.1.3_7E18_Restore.ipsw \
 ```
 
 The script decrypts the kernel and device tree, then decrypts, grows and
-provisions the root volume. The steps are those in `plans/ios3-m68.md`. It
-then boots the volume natively to the lock screen (`--steps`, default
-3.6 G instructions, about 2 minutes) and writes a manifest describing the
-paired snapshot and disk:
+provisions the root volume. The steps are those in `plans/ios3-m68.md`, plus
+"never auto-lock" for the mobile user and a provisioned lockdownd device key
+pair. It then boots the volume natively, slides to unlock, dismisses the
+first-run alert, and waits on the home screen until the first-boot Security
+work is over (`--steps`, default 7 G instructions, about 4.5 minutes). It
+writes a manifest describing the paired snapshot and disk:
 
 | File | Size |
 | --- | --- |
@@ -42,8 +44,16 @@ server has, and switches with `?firmware=7E18`. When no local firmware
 exists, the picker stays hidden. The page without the parameter is
 unchanged: the 1.0 phone, its browser saves and offline visits.
 
-Measured locally (Chrome, Windows 11): ready at the lock screen 3.3 s after
-navigation, about 25 M instructions/s, 873 MiB WASM heap. Slide to unlock,
+Measured locally (Chrome, Windows 11): ready 3.3 s after navigation, about
+25 M instructions/s, 873 MiB WASM heap.
+
+First-boot guest work matters more than host speed here. Without provisioned
+keys, lockdownd generates its device RSA pair in Security's bignum code,
+which took 51-95% of guest instructions until about 5.3-6.0 G instructions.
+A snapshot taken before that point makes every visit repeat it. With the keys
+provisioned and the snapshot taken after the remaining bignum work (none
+after ~5.9 G), a Calculator launch from the home screen takes 0.29 G guest
+instructions, against 0.39 G from a snapshot taken during that work. Slide to unlock,
 taps, app launch (Calculator) and the Home button work. The guest runs on
 the interpreter only, so it is slow.
 

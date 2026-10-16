@@ -10,9 +10,11 @@ KEYS     this build's published firmware keys as JSON, either {"keys": [...]}
          or a bare list of {"image", "filename", "iv", "key"} records, the
          format used by community key archives. Keys are not hardcoded here.
 --iphone1  native tools/iphone1 build. With it, the script boots the prepared
-           volume to the lock screen and ships that snapshot, so the browser
-           starts in seconds. Without it, the browser cold boots
-           (about 3 G instructions).
+           volume, slides to unlock, dismisses SpringBoard's first-run alert
+           and waits for the first-boot Security bignum work to finish before
+           saving, so the browser starts on the home screen in seconds and
+           never repeats that work. Without it, the browser cold boots (about
+           3 G instructions to the lock screen).
 
 Steps, each from a measured failure (see plans/ios3-m68.md):
   1. decrypt the kernelcache and M68 device tree (IMG3, final block included);
@@ -20,7 +22,10 @@ Steps, each from a measured failure (see plans/ios3-m68.md):
   3. grow it by 96 MB, rewrite fstab to /dev/md0, select Core Animation's
      software renderer for SpringBoard and seed lockdownd's FactoryActivated
      record;
-  4. optionally boot it natively and keep the paired snapshot and disk.
+  4. disable SpringBoard's auto-lock and dim for the mobile user, and
+     provision lockdownd's device RSA key pair (it otherwise generates one in
+     Security's bignum code, 51-95% of guest instructions for >2 G);
+  5. optionally boot it natively and keep the paired snapshot and disk.
 """
 import argparse
 import hashlib
@@ -78,7 +83,7 @@ def main():
     ap.add_argument("outdir", type=Path)
     ap.add_argument("--keys", type=Path, required=True)
     ap.add_argument("--iphone1", type=Path)
-    ap.add_argument("--steps", type=int, default=3_600_000_000)
+    ap.add_argument("--steps", type=int, default=7_000_000_000)
     a = ap.parse_args()
 
     keys = json.loads(a.keys.read_text())
@@ -111,9 +116,11 @@ def main():
     run(py, HERE / "rootfs_work.py", work / "rootfs.img", disk,
         "--fstab", FSTAB,
         "--launchd-env", "com.apple.SpringBoard.plist=CA_ENABLE_MBX2D=0",
+        "--no-autolock-mobile", "--device-keys",
         "--add", "/private/var/root/Library/Lockdown/data_ark.plist=" +
         str(HERE / "data_ark_activated_3x.plist"))
     shutil.rmtree(work)
+    work.mkdir()
     print("root volume ready")
 
     manifest = {
@@ -128,13 +135,26 @@ def main():
         snap = out / "home_7E18.snap"
         # --rootfs is written in place, so the disk shipped is exactly the
         # one the snapshot was taken against.
+        # The lock screen is drawn by ~3.0 G instructions and sleeps by
+        # itself around 4.5-5.0 G, so unlock at 3.4 G while it is lit. Dismiss
+        # the "Edit Home Screen" alert, then let the remaining first-boot
+        # Security bignum work finish on the home screen (measured: none after
+        # ~5.9 G with provisioned device keys) and save at 7 G.
+        gesture = ["--at", "3400000000", "touch", "down", "50", "430"]
+        for i in range(1, 8):
+            gesture += ["--at", str(3_400_000_000 + i * 5_000_000),
+                        "touch", "move", str(50 + i * 36), "430"]
+        gesture += ["--at", "3440000000", "touch", "up", "302", "430",
+                    "--at", "5000000000", "tap", "160", "332"]
         run(a.iphone1, "--board", "m68", "--ios3",
             "--kernel", out / "kernel_7E18.macho",
             "--devicetree", out / "devicetree_m68ap.bin",
-            "--rootfs", disk, "--save-at", a.steps, snap,
-            "--steps", a.steps + 1)
+            "--rootfs", disk, "--no-spin-stop", *gesture,
+            "--screenshot", out / "home_check.ppm",
+            "--save-at", a.steps, snap, "--steps", a.steps + 1)
         manifest["snapshot"] = {"path": snap.name, "size": snap.stat().st_size}
         manifest["disk"]["size"] = disk.stat().st_size
+    shutil.rmtree(work, ignore_errors=True)
     manifest["downloadBytes"] = sum(e["size"] for k, e in manifest.items()
                                     if isinstance(e, dict))
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

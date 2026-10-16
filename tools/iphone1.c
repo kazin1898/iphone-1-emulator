@@ -239,6 +239,8 @@ static void usage(void) {
          "                    modified in place, so pass a copy\n"
          "  --lcd-panel-id N  Merlot panel ID for --ios3 (default: the N82 value)\n"
          "  --codesign-off    --ios3: disable guest code-signing enforcement\n"
+         "  --profile FILE    sample \"pc ttbr0 privileged\" every 10007 instructions\n"
+         "  --no-spin-stop    keep running through an idle kernel loop\n"
          "  --dump-ram FILE  write the guest RAM image when the run ends");
 }
 
@@ -298,6 +300,9 @@ int main(int argc,char **argv) {
     uint64_t save_step = UINT64_MAX;
     input_event_t events[128]; unsigned event_n = 0;
     bool ios3 = false, codesign_off = false; const char *rootfs = NULL;
+    FILE *profile = NULL;
+    bool spin_stop = true;
+    enum { PROFILE_PERIOD = 10007u };
     uint32_t panel_id = 0;
     for (int i=1;i<argc;i++) {
         if (!strcmp(argv[i],"--board")&&i+1<argc) board_name=argv[++i];
@@ -305,6 +310,11 @@ int main(int argc,char **argv) {
         else if (!strcmp(argv[i],"--rootfs")&&i+1<argc) rootfs=argv[++i];
         else if (!strcmp(argv[i],"--lcd-panel-id")&&i+1<argc) panel_id=(uint32_t)strtoul(argv[++i],NULL,0);
         else if (!strcmp(argv[i],"--codesign-off")) codesign_off=true;
+        else if (!strcmp(argv[i],"--no-spin-stop")) spin_stop=false;
+        else if (!strcmp(argv[i],"--profile")&&i+1<argc) {
+            profile=fopen(argv[++i],"w");
+            if (!profile) { perror("--profile"); return 1; }
+        }
         else if (!strcmp(argv[i],"--kernel")&&i+1<argc) kp=argv[++i];
         else if (!strcmp(argv[i],"--devicetree")&&i+1<argc) dp=argv[++i];
         else if (!strcmp(argv[i],"--ramdisk")&&i+1<argc) rp=argv[++i];
@@ -581,7 +591,13 @@ int main(int argc,char **argv) {
          * EXEC/SWI logs report. */
         if (m.cpu.cycles>=trace_from) { slice=1; trace_record(&m); }
         else if (m.cpu.cycles+slice>trace_from) slice=(unsigned)(trace_from-m.cpu.cycles);
+        /* --profile samples the PC every PROFILE_PERIOD retired
+         * instructions (a prime, so it does not beat against loops). */
+        if (profile && slice > PROFILE_PERIOD) slice = PROFILE_PERIOD;
         unsigned n=s5l8900_run(&m,slice,&st); total+=n; ring[ri++%32]=m.cpu.r[15];
+        if (profile && n)
+            fprintf(profile, "%08x %08x %u\n", m.cpu.r[15], m.cpu.cp15.ttbr0,
+                    (m.cpu.cpsr & 31u) != 0x10u);
         if (audio_wav && !wav) {
             wav = fopen(audio_wav, "wb");
             if (!wav) { fprintf(stderr, "cannot open %s\n", audio_wav); audio_wav = NULL; }
@@ -611,7 +627,9 @@ int main(int argc,char **argv) {
         uint32_t win=m.cpu.r[15]&~63u;
         if (win==last_window) same++; else same=0; last_window=win;
         if (st!=ARM_OK) { reason=status_name(st); break; }
-        if (same>=20 && slice>1) { reason="spin"; break; }
+        /* Twenty slice-end PCs in one 64-byte window is a spin at the normal
+         * 1M-instruction slice, but only an idle loop at --profile's 10007. */
+        if (!profile && spin_stop && same>=20 && slice>1) { reason="spin"; break; }
         if (!n) break;
     }
     printf("\nreason=%s instructions=%llu pc=0x%08x cpsr=0x%08x\n",reason,
