@@ -233,7 +233,8 @@ async function start(message) {
   const manifest = await response.json();
   if (manifest.kind === 'ios3') {
     await startIos3(message, manifest, manifestURL);
-    await finishStart(message, false, false);
+    // Only this firmware's own seed (?seed=, recorded from its code) runs it.
+    await finishStart(message, false, Boolean(new URL(location.href).searchParams.get('seed')));
     return;
   }
   const downloads = [manifest.kernel, manifest.devicetree,
@@ -278,8 +279,8 @@ async function start(message) {
 }
 // `wake`: a restored OS 1.0 phone enters its own lock screen first. iPhone OS 3
 // snapshots are already taken there, and a cold boot draws it by itself.
-// `seed`: the generated regions were compiled from OS 1.0 code and are keyed
-// by address, not by contents, so another OS runs on the interpreter only.
+// `seed`: the default regions were recorded from OS 1.0. Another OS runs them
+// only from its own seed directory; without one it stays on the interpreter.
 async function finishStart(message, wake, seed = true) {
   // Optional code preparation runs alongside the genuine guest startup.
   jit = seed ? new SeedJIT(module) : null;

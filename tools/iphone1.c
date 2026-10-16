@@ -124,6 +124,91 @@ static bool read_va32(s5l8900_t *m, uint32_t va, uint32_t *out) {
         pa<m->ram_base || pa-m->ram_base+4u>m->ram_size) return false;
     memcpy(out, m->ram+(pa-m->ram_base), 4); return true;
 }
+/*
+ * --record-ops: the observations the guarded seed generator compiles
+ * (tools/jit/generate-seed.mjs). Every executed instruction position is kept
+ * once with its mode and code word (Thumb halfwords individually); each
+ * 1 KiB region is ranked by executions, and the hottest REC_REGIONS are
+ * written in seed-input.json form. Nothing here touches guest state.
+ */
+#define REC_OPS_BITS 21u
+#define REC_REGION_BITS 17u
+#define REC_REGIONS 512u
+typedef struct { uint64_t key; uint32_t word; bool used; } rec_op_t;
+typedef struct { uint32_t key; uint64_t count; bool used; } rec_region_t;
+static rec_op_t *g_rec_ops;
+static rec_region_t *g_rec_regions;
+static uint64_t g_rec_ops_n, g_rec_steps;
+static uint64_t rec_hash(uint64_t k) { k ^= k >> 33; k *= 0xff51afd7ed558ccdull; return k ^ (k >> 33); }
+static void rec_note(s5l8900_t *m, uint32_t pc, bool thumb) {
+    uint32_t word;
+    if (!read_va32(m, pc & ~3u, &word)) return;
+    if (thumb) word = (pc & 2u) ? word >> 16 : word & 0xffffu;
+    else if (pc & 3u) return;
+    uint64_t key = (uint64_t)pc << 1 | thumb, mask = (1ull << REC_OPS_BITS) - 1u;
+    for (uint64_t i = rec_hash(key) & mask;; i = (i + 1u) & mask) {
+        rec_op_t *e = &g_rec_ops[i];
+        if (!e->used) {
+            if (g_rec_ops_n >= mask / 2u) break;   /* full: keep counting regions */
+            *e = (rec_op_t){key, word, true}; g_rec_ops_n++; break;
+        }
+        if (e->key == key) { e->word = word; break; }
+    }
+    uint32_t rkey = (pc >> 10) << 1 | thumb, rmask = (1u << REC_REGION_BITS) - 1u;
+    for (uint32_t i = (uint32_t)rec_hash(rkey) & rmask;; i = (i + 1u) & rmask) {
+        rec_region_t *r = &g_rec_regions[i];
+        if (!r->used) { *r = (rec_region_t){rkey, 1u, true}; break; }
+        if (r->key == rkey) { r->count++; break; }
+    }
+    g_rec_steps++;
+}
+static int rec_region_cmp(const void *a, const void *b) {
+    const rec_region_t *x = a, *y = b;
+    return x->count < y->count ? 1 : x->count > y->count ? -1 : (x->key > y->key) - (x->key < y->key);
+}
+static int rec_op_cmp(const void *a, const void *b) {
+    const rec_op_t *x = a, *y = b;
+    return (x->key > y->key) - (x->key < y->key);
+}
+static bool rec_write(const char *path) {
+    size_t nr = 0, rmax = 1u << REC_REGION_BITS, omax = 1u << REC_OPS_BITS;
+    rec_region_t *regions = malloc(rmax * sizeof *regions);
+    rec_op_t *ops = malloc(omax * sizeof *ops);
+    FILE *f = fopen(path, "w");
+    if (!regions || !ops || !f) { free(regions); free(ops); if (f) fclose(f); return false; }
+    for (size_t i = 0; i < rmax; i++) if (g_rec_regions[i].used) regions[nr++] = g_rec_regions[i];
+    qsort(regions, nr, sizeof *regions, rec_region_cmp);
+    if (nr > REC_REGIONS) nr = REC_REGIONS;
+    size_t no = 0;
+    for (size_t i = 0; i < omax; i++) if (g_rec_ops[i].used) ops[no++] = g_rec_ops[i];
+    qsort(ops, no, sizeof *ops, rec_op_cmp);
+    uint64_t covered = 0;
+    fprintf(f, "{\"version\":1,\"description\":\"Executed opcode positions recorded by "
+               "tools/iphone1 --record-ops; observations of genuine guest code, no guest data.\","
+               "\"regions\":[");
+    for (size_t r = 0; r < nr; r++) {
+        uint32_t base = (regions[r].key >> 1) << 10; bool thumb = regions[r].key & 1u;
+        covered += regions[r].count;
+        fprintf(f, "%s{\"pc\":%u,\"thumb\":%s,\"index\":%zu,\"ops\":[", r ? "," : "",
+                base, thumb ? "true" : "false", r);
+        bool first = true;
+        for (size_t i = 0; i < no; i++) {
+            uint32_t pc = (uint32_t)(ops[i].key >> 1);
+            if ((ops[i].key & 1u) != thumb || (pc & ~1023u) != base) continue;
+            fprintf(f, "%s[%u,%u]", first ? "" : ",", pc, ops[i].word);
+            first = false;
+        }
+        fputs("]}", f);
+    }
+    fputs("]}\n", f);
+    fclose(f);
+    fprintf(stderr, "recorded %llu instructions, %llu positions; %zu regions cover %.1f%%\n",
+            (unsigned long long)g_rec_steps, (unsigned long long)g_rec_ops_n, nr,
+            g_rec_steps ? covered * 100.0 / (double)g_rec_steps : 0.0);
+    free(regions); free(ops);
+    return true;
+}
+
 static void print_va_str(FILE *o, s5l8900_t *m, uint32_t va) {
     for (unsigned i=0;i<256;i+=4) { uint32_t w; if (!read_va32(m,va+i,&w)) { fputc('?',o); return; }
         for (unsigned b=0;b<4;b++) { char c=(char)(w>>(8*b)); if (!c) return; fputc(c,o); } }
@@ -244,6 +329,8 @@ static void usage(void) {
          "  --codesign-off    --ios3: disable guest code-signing enforcement\n"
          "  --profile FILE    sample \"pc ttbr0 privileged\" every 10007 instructions\n"
          "  --no-spin-stop    keep running through an idle kernel loop\n"
+         "  --record-ops FILE [--record-from STEP]  record executed opcode positions\n"
+         "                    (one instruction per slice; slow) as seed input JSON\n"
          "  --dump-ram FILE  write the guest RAM image when the run ends");
 }
 
@@ -305,6 +392,7 @@ int main(int argc,char **argv) {
     bool ios3 = false, codesign_off = false; const char *rootfs = NULL;
     FILE *profile = NULL;
     bool spin_stop = true;
+    const char *record_path = NULL; uint64_t record_from = 0;
     enum { PROFILE_PERIOD = 10007u };
     uint32_t panel_id = 0;
     for (int i=1;i<argc;i++) {
@@ -314,6 +402,8 @@ int main(int argc,char **argv) {
         else if (!strcmp(argv[i],"--lcd-panel-id")&&i+1<argc) panel_id=(uint32_t)strtoul(argv[++i],NULL,0);
         else if (!strcmp(argv[i],"--codesign-off")) codesign_off=true;
         else if (!strcmp(argv[i],"--no-spin-stop")) spin_stop=false;
+        else if (!strcmp(argv[i],"--record-ops")&&i+1<argc) record_path=argv[++i];
+        else if (!strcmp(argv[i],"--record-from")&&i+1<argc) record_from=strtoull(argv[++i],NULL,0);
         else if (!strcmp(argv[i],"--profile")&&i+1<argc) {
             profile=fopen(argv[++i],"w");
             if (!profile) { perror("--profile"); return 1; }
@@ -508,6 +598,11 @@ int main(int argc,char **argv) {
         return 2;
     }
     qsort(events, event_n, sizeof events[0], input_compare);
+    if (record_path) {
+        g_rec_ops = calloc((size_t)1u << REC_OPS_BITS, sizeof *g_rec_ops);
+        g_rec_regions = calloc((size_t)1u << REC_REGION_BITS, sizeof *g_rec_regions);
+        if (!g_rec_ops || !g_rec_regions) { fprintf(stderr, "--record-ops: out of memory\n"); return 1; }
+    }
     tap_t t={serial?fopen(serial,"wb"):NULL,&m,true}; s5l8900_set_uart0_host(&m,tap,&t);
     arm_status_t st=ARM_OK; uint64_t total=m.cpu.cycles; uint32_t ring[32]={0}; unsigned ri=0, same=0;
     unsigned next_event = 0, touch_retries = 0; bool saved = false;
@@ -543,8 +638,12 @@ int main(int argc,char **argv) {
             bool ok = s5l8900_set_button(&m, press_button, false);
             fprintf(stderr, "input step=%llu button %u up -> %s\n",
                     (unsigned long long)total, press_button,
-                    ok ? "accepted" : "rejected");
-            press_pending = false;
+                    ok ? "accepted" : "rejected, retrying");
+            /* GPIO may still be servicing the down edge. Retry shortly
+             * rather than leaving the button held for the rest of the run. */
+            if (ok) press_pending = false;
+            else press_down_ticks = m.timer.ticks - tap_duration_ticks +
+                                    tap_duration_ticks / 10u;
             continue;
         }
         unsigned slice=(unsigned)((steps-total)>1000000ull?1000000ull:steps-total);
@@ -597,7 +696,11 @@ int main(int argc,char **argv) {
         /* --profile samples the PC every PROFILE_PERIOD retired
          * instructions (a prime, so it does not beat against loops). */
         if (profile && slice > PROFILE_PERIOD) slice = PROFILE_PERIOD;
+        uint32_t rec_pc = m.cpu.r[15]; bool rec_thumb = (m.cpu.cpsr & 0x20u) != 0;
+        bool recording = g_rec_ops && total >= record_from;
+        if (recording) slice = 1;
         unsigned n=s5l8900_run(&m,slice,&st); total+=n; ring[ri++%32]=m.cpu.r[15];
+        if (recording && n) rec_note(&m, rec_pc, rec_thumb);
         if (profile && n)
             fprintf(profile, "%08x %08x %u\n", m.cpu.r[15], m.cpu.cp15.ttbr0,
                     (m.cpu.cpsr & 31u) != 0x10u);
@@ -635,6 +738,8 @@ int main(int argc,char **argv) {
         if (!profile && spin_stop && same>=20 && slice>1) { reason="spin"; break; }
         if (!n) break;
     }
+    if (record_path && !rec_write(record_path))
+        fprintf(stderr, "--record-ops: cannot write %s\n", record_path);
     printf("\nreason=%s instructions=%llu pc=0x%08x cpsr=0x%08x\n",reason,
            (unsigned long long)total,m.cpu.r[15],m.cpu.cpsr);
     for (unsigned i=0;i<16;i++) printf("r%u=0x%08x%s",i,m.cpu.r[i],i%4==3?"\n":" ");

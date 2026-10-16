@@ -438,7 +438,13 @@ int emu_load_snapshot(const uint8_t *buf, size_t len) {
         set_error(snapshot_strerror(status));
         return -3;
     }
-    browser_clock_compatible = browser_guest_clock_compatible();
+    browser_clock_compatible = ios3_disk ? false : browser_guest_clock_compatible();
+    /* The raw memory-disk bridge keeps in-flight transfers (svc 0xe3 ... 0xe4)
+     * on the host, outside the snapshot. Restart it as bring-up left it, so a
+     * restore never inherits the previous run's pending slots: measured, two
+     * interpreter runs from one snapshot otherwise diverged within 100 M
+     * instructions. md_raw_bridge_init() keeps the configuration. */
+    if (ios3_disk) md_raw_bridge_init(&ios3_md.raw, &ios3_md.raw.config);
     browser_wait_until_ms = 0;
     reset_host_inputs();
     last_status = ARM_OK;

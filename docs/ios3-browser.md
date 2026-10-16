@@ -76,8 +76,15 @@ the interpreter only.
   memory-disk bridge, and checkpoints capture RAM only. Save, Export and
   Import stay off, and the page never takes the 1.0 profile. Every visit
   starts again from the shipped snapshot.
-- **No seed JIT.** Its generated regions were compiled from OS 1.0 code and
-  are keyed by address, not contents, so 3.1.3 runs interpreted.
+- **Own seed only.** The 1.0 seed is never used for 3.1.3. With
+  `prepare_ios3_web.py --seed`, the firmware gets its own seed, recorded from
+  a 3.1.3 app workload (see `tools/jit/README.md`). 510 regions run it with a
+  machine and disk equal to the interpreter's over 600 M instructions.
+  Steady-state WASM time for the Calculator launch window is 4.34 s on the
+  interpreter and 3.82 s with the seed (1.13x). Kernel code runs
+  interpreted. iPhone OS 3's memory-disk SVC handler limits batching, and so
+  the seed, to User mode, as S5LBox does. Before that rule, the handler had
+  switched batching off entirely, so no seed region could ever run.
 - **No offline package** for local firmware, and no network or Wi-Fi in the
   guest.
 - The disk is streamed into the WASM heap without Cache Storage or SHA-256

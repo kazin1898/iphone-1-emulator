@@ -3,6 +3,7 @@
 
 usage:
   prepare_ios3_web.py IPSW OUTDIR --keys KEYS.json [--iphone1 PATH] [--steps N]
+                      [--seed]
 
 IPSW     iPhone1,1_3.1.3_7E18_Restore.ipsw
 OUTDIR   normally web/firmware/7E18 (ignored by git; never publish it)
@@ -15,6 +16,11 @@ KEYS     this build's published firmware keys as JSON, either {"keys": [...]}
            saving, so the browser starts on the home screen in seconds and
            never repeats that work. Without it, the browser cold boots (about
            3 G instructions to the lock screen).
+--seed     also record this firmware's executed code during a scripted app
+           workload from the snapshot (tools/iphone1 --record-ops) and compile
+           the browser's guarded seed for it into OUTDIR/jit (needs node and
+           the built web/dist runtime). Without it the page runs 3.1.3 on
+           the interpreter only.
 
 Steps, each from a measured failure (see plans/ios3-m68.md):
   1. decrypt the kernelcache and M68 device tree (IMG3, final block included);
@@ -30,6 +36,7 @@ Steps, each from a measured failure (see plans/ios3-m68.md):
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -84,6 +91,7 @@ def main():
     ap.add_argument("--keys", type=Path, required=True)
     ap.add_argument("--iphone1", type=Path)
     ap.add_argument("--steps", type=int, default=7_000_000_000)
+    ap.add_argument("--seed", action="store_true")
     a = ap.parse_args()
 
     keys = json.loads(a.keys.read_text())
@@ -153,6 +161,42 @@ def main():
             "--save-at", a.steps, snap, "--steps", a.steps + 1)
         manifest["snapshot"] = {"path": snap.name, "size": snap.stat().st_size}
         manifest["disk"]["size"] = disk.stat().st_size
+    if a.seed:
+        if not a.iphone1:
+            raise SystemExit("--seed needs --iphone1")
+        # Open Calculator, Home, swipe the home screen, Settings, Notes and
+        # Clock, each followed by Home, from the shipped snapshot. The guest
+        # writes to a scratch copy, so the shipped disk stays paired.
+        t = a.steps
+        events = [(10_000_000, ["tap", "268", "248"]), (300_000_000, ["press", "menu"])]
+        events.append((520_000_000, ["touch", "down", "40", "240"]))
+        for i in range(1, 7):
+            events.append((520_000_000 + i * 6_000_000,
+                           ["touch", "move", str(40 + i * 40), "240"]))
+        events += [(560_000_000, ["touch", "up", "280", "240"]),
+                   (800_000_000, ["press", "menu"]),
+                   (1_000_000_000, ["tap", "40", "330"]), (1_350_000_000, ["press", "menu"]),
+                   (1_550_000_000, ["tap", "122", "248"]), (1_900_000_000, ["press", "menu"]),
+                   (2_100_000_000, ["tap", "195", "248"]), (2_400_000_000, ["press", "menu"])]
+        script = []
+        for offset, action in events:
+            script += ["--at", str(t + offset), *action]
+        scratch = work / "record.img"
+        shutil.copyfile(disk, scratch)
+        recording = work / "seed-input.json"
+        run(a.iphone1, "--board", "m68", "--ios3",
+            "--kernel", out / "kernel_7E18.macho",
+            "--devicetree", out / "devicetree_m68ap.bin",
+            "--rootfs", scratch, "--load", out / "home_7E18.snap",
+            "--no-spin-stop", "--record-ops", recording, "--record-from", t,
+            *script, "--steps", t + 2_600_000_000)
+        import gzip
+        (out / "seed-input.json.gz").write_bytes(gzip.compress(recording.read_bytes()))
+        env = dict(os.environ, SEED_INPUT=str((out / "seed-input.json.gz").resolve()),
+                   JIT_OUTPUT=str((out / "jit").resolve()))
+        subprocess.run(["node", str(HERE.parent / "jit" / "generate-seed.mjs")],
+                       check=True, env=env)
+        manifest["seed"] = "jit/"
     shutil.rmtree(work, ignore_errors=True)
     manifest["downloadBytes"] = sum(e["size"] for k, e in manifest.items()
                                     if isinstance(e, dict))

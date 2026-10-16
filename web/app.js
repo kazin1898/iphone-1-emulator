@@ -148,6 +148,8 @@ async function start(recovery = null) {
   // A diagnostic opt-out compares the same build's literal interpreter loop.
   if (new URLSearchParams(location.search).get('jit') === '0')
     workerURL.searchParams.set('jit', '0');
+  // A non-default firmware accelerates only with its own recorded seed.
+  if (ephemeral && firmware.seed) workerURL.searchParams.set('seed', new URL(firmware.seed, location.href).pathname);
   worker = new Worker(workerURL);
   worker.onerror = event => fail(new Error(event.message || 'Emulator worker failed'));
   worker.onmessage = ({data:message}) => {
