@@ -1,7 +1,8 @@
 # iPhone OS 3.1.3 (7E18) on iPhone1,1 (M68)
 
 Status: 2026-10-15. The native tool boots the original iPhone1,1 7E18 kernel
-on the M68 board and reaches the lock screen. Touch input does not unlock it yet.
+on the M68 board to the lock screen. Slide to unlock reaches the home screen
+(about 4.7 G instructions), and a tap dismisses an alert there.
 
 ## What works
 
@@ -23,6 +24,20 @@ on the M68 board and reaches the lock screen. Touch input does not unlock it yet
   WM8758, PL080 and multitouch drivers start, the Z1 firmware download (44,484
   bytes) completes, and SpringBoard draws the lock screen by about 3.0 G
   instructions. That is about 100 s natively at about 30 MIPS.
+
+## Touch
+
+3.1.3's AppleMultitouchSPI selects a newer Z1 read protocol through the
+driver's 0x1bc mode byte (0xc043c754). It sends an eight-byte length probe:
+0x64 at the start of a gesture and 0x65 after each frame. The reply puts
+the length at [4..5] and its sum at [6..7] (0xc043bd08). The frame itself is
+read with op 0x68 (0xc043a594) in the same AA/payload/sum layout as OS 1.0's
+0x47. OS 1.0 still probes with 0x46 only. A native tap on the shipped 1.0
+Home snapshot produces a byte-identical screen before and after the change.
+
+The old model answered 0x64 in OS 1.0's layout, at [1..4]. The driver read a
+zero length, retried six times, logged "Too many errors reading a frame of
+data", power-cycled the controller and downloaded its firmware again.
 
 ## Preparing the root volume
 
@@ -60,11 +75,6 @@ kernelcache was 42 bytes short.
 
 ## Next gates
 
-1. **Touch.** The 3.1.3 AppleMultitouchSPI reads only the 8-byte header of a
-   Z1 frame (op 0x64) and never the payload. After six reads it power-cycles
-   the controller and downloads the firmware again. The Z1 model encodes the
-   OS 1.0 frame layout, so the 3.x read protocol has to be traced from the
-   driver.
-2. **Browser.** `web/emu_api.c` still calls only `s5l_os1_boot()`.
-3. **Cydia and networking.** S5LBox has a packet bridge (PPP over uart4) and
+1. **Browser.** `web/emu_api.c` still calls only `s5l_os1_boot()`.
+2. **Cydia and networking.** S5LBox has a packet bridge (PPP over uart4) and
    an APT installer path, but neither is ported.
