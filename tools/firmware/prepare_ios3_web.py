@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Prepare iPhone OS 3.1.3 (7E18) for the browser from your own IPSW.
+
+usage:
+  prepare_ios3_web.py IPSW OUTDIR --keys KEYS.json [--iphone1 PATH] [--steps N]
+
+IPSW     iPhone1,1_3.1.3_7E18_Restore.ipsw
+OUTDIR   normally web/firmware/7E18 (ignored by git; never publish it)
+KEYS     this build's published firmware keys as JSON, either {"keys": [...]}
+         or a bare list of {"image", "filename", "iv", "key"} records, the
+         format used by community key archives. Keys are not hardcoded here.
+--iphone1  native tools/iphone1 build. With it, the script boots the prepared
+           volume to the lock screen and ships that snapshot, so the browser
+           starts in seconds. Without it, the browser cold boots
+           (about 3 G instructions).
+
+Steps, each from a measured failure (see plans/ios3-m68.md):
+  1. decrypt the kernelcache and M68 device tree (IMG3, final block included);
+  2. decrypt and extract the root volume;
+  3. grow it by 96 MB, rewrite fstab to /dev/md0, select Core Animation's
+     software renderer for SpringBoard and seed lockdownd's FactoryActivated
+     record;
+  4. optionally boot it natively and keep the paired snapshot and disk.
+"""
+import argparse
+import hashlib
+import json
+import shutil
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import img3_decrypt  # noqa: E402
+import unlzss  # noqa: E402
+
+KERNEL_SHA256 = "f36a88d611d3b906ae858f377e21853b40b214b2bea99cb2f988e380698e6ce9"
+KERNEL_MEMBER = "kernelcache.release.s5l8900x"
+DT_MEMBER = "Firmware/all_flash/all_flash.m68ap.production/DeviceTree.m68ap.img3"
+FSTAB = "/dev/md0 / hfs rw,update 0 0"
+
+
+def find_key(keys, name):
+    for record in keys:
+        if record.get("image") == name or record.get("filename") == name:
+            return record
+    raise SystemExit(f"no key for {name} in the keys file")
+
+
+def decrypt_img3(data, record):
+    tags = {n: (d, b) for n, d, b in img3_decrypt.tags(data)}
+    payload, body = tags["DATA"]
+    span = (len(payload) + 15) // 16 * 16
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    dec = Cipher(algorithms.AES(bytes.fromhex(record["key"])),
+                 modes.CBC(bytes.fromhex(record["iv"]))).decryptor()
+    return (dec.update(body[:span]) + dec.finalize())[:len(payload)]
+
+
+def kernel_from(complzss):
+    import struct
+    adler, size, cmp = struct.unpack(">III", complzss[8:20])
+    out = unlzss.decompress(complzss[0x180:0x180 + cmp], size)
+    if len(out) != size or unlzss.adler32(out) != adler:
+        raise SystemExit("kernelcache did not decompress cleanly")
+    return bytes(out)
+
+
+def run(*args):
+    subprocess.run([str(a) for a in args], check=True)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("ipsw", type=Path)
+    ap.add_argument("outdir", type=Path)
+    ap.add_argument("--keys", type=Path, required=True)
+    ap.add_argument("--iphone1", type=Path)
+    ap.add_argument("--steps", type=int, default=3_600_000_000)
+    a = ap.parse_args()
+
+    keys = json.loads(a.keys.read_text())
+    keys = keys["keys"] if isinstance(keys, dict) else keys
+    out = a.outdir
+    work = out / "work"
+    work.mkdir(parents=True, exist_ok=True)
+
+    with zipfile.ZipFile(a.ipsw) as z:
+        kc = z.read(KERNEL_MEMBER)
+        dt = z.read(DT_MEMBER)
+        dmg = max((i for i in z.infolist() if i.filename.endswith(".dmg")),
+                  key=lambda i: i.file_size)
+        z.extract(dmg, work)
+
+    kernel = kernel_from(decrypt_img3(kc, find_key(keys, KERNEL_MEMBER)))
+    if hashlib.sha256(kernel).hexdigest() != KERNEL_SHA256:
+        raise SystemExit("this is not the iPhone1,1 7E18 kernel the gate accepts")
+    (out / "kernel_7E18.macho").write_bytes(kernel)
+    (out / "devicetree_m68ap.bin").write_bytes(
+        decrypt_img3(dt, find_key(keys, "DeviceTree.m68ap.img3")))
+    print("kernel and device tree ready")
+
+    rootfs_key = find_key(keys, Path(dmg.filename).name)["key"]
+    py = sys.executable
+    run(py, HERE / "vfdecrypt.py", work / dmg.filename, rootfs_key, work / "rootfs.dmg")
+    run(py, HERE / "udif.py", "extract", work / "rootfs.dmg", work / "rootfs.img", "Apple_HFSX")
+    run(py, HERE / "hfsx_grow.py", work / "rootfs.img", "96")
+    disk = out / "disk_7E18.img"
+    run(py, HERE / "rootfs_work.py", work / "rootfs.img", disk,
+        "--fstab", FSTAB,
+        "--launchd-env", "com.apple.SpringBoard.plist=CA_ENABLE_MBX2D=0",
+        "--add", "/private/var/root/Library/Lockdown/data_ark.plist=" +
+        str(HERE / "data_ark_activated_3x.plist"))
+    shutil.rmtree(work)
+    print("root volume ready")
+
+    manifest = {
+        "kind": "ios3",
+        "name": "iPhone OS 3.1.3 (7E18)",
+        "kernel": {"path": "kernel_7E18.macho", "size": len(kernel)},
+        "devicetree": {"path": "devicetree_m68ap.bin",
+                       "size": (out / "devicetree_m68ap.bin").stat().st_size},
+        "disk": {"path": disk.name, "size": disk.stat().st_size},
+    }
+    if a.iphone1:
+        snap = out / "home_7E18.snap"
+        # --rootfs is written in place, so the disk shipped is exactly the
+        # one the snapshot was taken against.
+        run(a.iphone1, "--board", "m68", "--ios3",
+            "--kernel", out / "kernel_7E18.macho",
+            "--devicetree", out / "devicetree_m68ap.bin",
+            "--rootfs", disk, "--save-at", a.steps, snap,
+            "--steps", a.steps + 1)
+        manifest["snapshot"] = {"path": snap.name, "size": snap.stat().st_size}
+        manifest["disk"]["size"] = disk.stat().st_size
+    manifest["downloadBytes"] = sum(e["size"] for k, e in manifest.items()
+                                    if isinstance(e, dict))
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    print(f"wrote {out / 'manifest.json'}")
+
+
+if __name__ == "__main__":
+    main()

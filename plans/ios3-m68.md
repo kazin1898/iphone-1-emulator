@@ -75,6 +75,7 @@ kernelcache was 42 bytes short.
 
 ## Next gates
 
-1. **Browser.** `web/emu_api.c` still calls only `s5l_os1_boot()`.
+1. **Browser saves.** `emu_init_ios3()` runs 3.1.3 in the page; see
+   `docs/ios3-browser.md`. Checkpoints still miss the root volume.
 2. **Cydia and networking.** S5LBox has a packet bridge (PPP over uart4) and
    an APT installer path, but neither is ported.
