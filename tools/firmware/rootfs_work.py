@@ -290,10 +290,32 @@ class Work:
         key_len = 6 + len(encoded)
         return struct.pack(">HIH", key_len, parent, len(name)) + encoded
 
+    def _find_path_record(self, path, rtype):
+        components = [x for x in path.split("/") if x]
+        parent = 2
+        for component in components[:-1]:
+            parent = self._resolve_path(component, parent)
+            if parent is None:
+                return None
+        return self._find_record(parent, components[-1], rtype)
+
+    # Templates for new catalog records. The 1A543a image is matched by its
+    # audited catalog IDs; other builds (iPhone OS 2.x/3.x lack
+    # /var/root/Library/Preferences) fall back to root-owned records found by
+    # path, so the new entry inherits root ownership and ordinary modes.
+    def _folder_template(self):
+        return (self._find_record(1451, "Preferences", 1) or
+                self._find_path_record("/private/var/root", 1))
+
+    def _file_template(self):
+        return (self._find_record(1452, ".GlobalPreferences.plist", 2) or
+                self._find_path_record("/private/etc/fstab", 2))
+
     def _new_folder(self, parent, name):
-        sibling = self._find_record(1451, "Preferences", 1)
+        sibling = self._folder_template()
         if not sibling:
-            raise SystemExit("folder template /var/root/Library/Preferences missing")
+            raise SystemExit("no folder template (/var/root/Library/Preferences "
+                             "or /private/var/root)")
         data = bytearray(sibling[4][sibling[3]:])
         ident = self._new_catalog_id()
         struct.pack_into(">I", data, 4, 0)
@@ -321,9 +343,10 @@ class Work:
 
     def _new_file(self, parent, name, data_bytes, *, mode=None, uid=None, gid=None):
         self._validate_new_file_permissions(mode, uid, gid)
-        sibling = self._find_record(1452, ".GlobalPreferences.plist", 2)
+        sibling = self._file_template()
         if not sibling:
-            raise SystemExit("file template /var/root/Library/Preferences missing")
+            raise SystemExit("no file template (/var/root/Library/Preferences/"
+                             ".GlobalPreferences.plist or /private/etc/fstab)")
         data = bytearray(sibling[4][sibling[3]:])
         if self.reuse_catalog_ids:
             ident = self._new_catalog_id()
